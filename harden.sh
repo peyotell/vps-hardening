@@ -27,7 +27,8 @@ die() {
 trap 'die "Скрипт завершился с ошибкой на строке $LINENO."' ERR
 
 # ============================================================
-# Interactive input from real terminal
+# Interactive input
+# Always read from real terminal
 # ============================================================
 
 ask() {
@@ -73,7 +74,7 @@ confirm() {
 }
 
 # ============================================================
-# Root check
+# Root
 # ============================================================
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -81,7 +82,7 @@ if [[ "${EUID}" -ne 0 ]]; then
 fi
 
 # ============================================================
-# Ubuntu check
+# OS check
 # ============================================================
 
 if [[ ! -r /etc/os-release ]]; then
@@ -126,7 +127,7 @@ echo "Продолжаю..."
 sleep 2
 
 # ============================================================
-# Packages
+# Packages / updates
 # ============================================================
 
 echo
@@ -150,7 +151,7 @@ apt-get full-upgrade -y
 log "Система обновлена."
 
 # ============================================================
-# SSH socket/service
+# SSH socket / service
 # ============================================================
 
 echo
@@ -176,7 +177,7 @@ fi
 SSH_SERVICE="ssh.service"
 
 # ============================================================
-# Current SSH port
+# Detect current SSH port
 # ============================================================
 
 CURRENT_SSH_PORT="$(
@@ -217,10 +218,11 @@ echo "============================================================"
 echo " Новый SSH-порт"
 echo "============================================================"
 echo
-echo "Можно использовать, например, 2222 или 22022."
+echo "Например: 2222 или 22022."
 echo
 
 while true; do
+
     SSH_PORT="$(ask "Новый SSH-порт")"
 
     if [[ ! "${SSH_PORT}" =~ ^[0-9]+$ ]]; then
@@ -238,7 +240,9 @@ while true; do
         continue
     fi
 
-    if ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq ":${SSH_PORT}$"; then
+    if ss -ltn 2>/dev/null |
+        awk '{print $4}' |
+        grep -Eq ":${SSH_PORT}$"; then
         echo "Порт ${SSH_PORT} уже занят."
         continue
     fi
@@ -249,7 +253,7 @@ done
 log "Новый SSH-порт: ${SSH_PORT}"
 
 # ============================================================
-# SSH key
+# SSH public key
 # ============================================================
 
 echo
@@ -258,36 +262,31 @@ echo " SSH-ключ"
 echo "============================================================"
 echo
 
-DEFAULT_KEY_NAME="vps_${HOSTNAME_VALUE}_root_ed25519"
+KEY_NAME="vps_${HOSTNAME_VALUE}_root_ed25519"
 
-echo "На своём компьютере во втором терминале создай НОВЫЙ ключ:"
+echo "На СВОЁМ компьютере во втором терминале создай новый ключ:"
 echo
-echo "  ssh-keygen -t ed25519 -f ~/.ssh/${DEFAULT_KEY_NAME}"
+echo "  ssh-keygen -t ed25519 -f ~/.ssh/${KEY_NAME}"
 echo
-echo "Если такой файл уже существует — используй другое имя."
+echo "Если такой файл уже существует, выбери другое имя"
+echo "при выполнении ssh-keygen."
+echo
+echo "После создания выполни:"
+echo
+echo "  cat ~/.ssh/${KEY_NAME}.pub"
+echo
+echo "Скопируй всю строку и вставь её ниже."
 echo
 
-KEY_NAME="$(ask "Имя ключа без ~/.ssh/" "${DEFAULT_KEY_NAME}")"
-
-if [[ ! "${KEY_NAME}" =~ ^[A-Za-z0-9._-]+$ ]]; then
-    die "Недопустимое имя ключа."
-fi
-
-KEY_PATH="~/.ssh/${KEY_NAME}"
-PUBLIC_KEY_PATH="${KEY_PATH}.pub"
-
-echo
-echo "После создания ключа выполни на своём компьютере:"
-echo
-echo "  cat ${PUBLIC_KEY_PATH}"
-echo
-echo "И вставь сюда одну строку public key."
-echo
+# ============================================================
+# Public key input
+# ============================================================
 
 while true; do
+
     SSH_PUBLIC_KEY="$(ask "SSH public key")"
 
-    # trim
+    # Remove leading/trailing whitespace.
     SSH_PUBLIC_KEY="${SSH_PUBLIC_KEY#"${SSH_PUBLIC_KEY%%[![:space:]]*}"}"
     SSH_PUBLIC_KEY="${SSH_PUBLIC_KEY%"${SSH_PUBLIC_KEY##*[![:space:]]}"}"
 
@@ -296,17 +295,19 @@ while true; do
     fi
 
     echo
-    echo "Некорректный SSH public key."
-    echo "Пример:"
-    echo
-    echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA..."
+    echo "Похоже, это невалидный SSH public key." > /dev/tty
+    echo "Ожидается строка вида:" > /dev/tty
+    echo > /dev/tty
+    echo "  ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA..." > /dev/tty
+    echo > /dev/tty
+    echo "Попробуй вставить public key ещё раз." > /dev/tty
     echo
 done
 
 log "SSH public key принят."
 
 # ============================================================
-# Additional ports
+# Additional TCP ports
 # ============================================================
 
 echo
@@ -315,7 +316,7 @@ echo " Дополнительные TCP-порты"
 echo "============================================================"
 echo
 echo "Например: 80,443"
-echo "Если не нужны — просто нажми Enter."
+echo "Если дополнительные порты не нужны — просто Enter."
 echo
 
 ADDITIONAL_PORTS_RAW="$(ask "Дополнительные TCP-порты")"
@@ -339,11 +340,11 @@ if [[ -n "${ADDITIONAL_PORTS_RAW}" ]]; then
         fi
 
         if [[ "${port}" == "${CURRENT_SSH_PORT}" ]]; then
-            die "Старый SSH-порт не нужно добавлять сюда."
+            die "Старый SSH-порт не нужно добавлять в дополнительные порты."
         fi
 
         if [[ "${port}" == "${SSH_PORT}" ]]; then
-            die "Новый SSH-порт не нужно добавлять сюда."
+            die "Новый SSH-порт не нужно добавлять в дополнительные порты."
         fi
 
         ADDITIONAL_PORTS+=("${port}")
@@ -362,9 +363,9 @@ echo
 echo "Hostname:          ${HOSTNAME_VALUE}"
 echo "Старый SSH-порт:   ${CURRENT_SSH_PORT}"
 echo "Новый SSH-порт:    ${SSH_PORT}"
-echo "Root SSH:          разрешён через ключ"
+echo "Root SSH:          через public key"
 echo "Пароль SSH:        будет отключён после проверки"
-echo "Ключ:              ${KEY_PATH}"
+echo "Локальный ключ:    ~/.ssh/${KEY_NAME}"
 echo "Доп. TCP-порты:    ${ADDITIONAL_PORTS_RAW:-нет}"
 echo
 
@@ -380,7 +381,7 @@ fi
 BACKUP_ROOT="/root/vps-hardening-backup-$(date +%Y%m%d-%H%M%S)"
 
 echo
-echo "Создаю backup..."
+echo "Создаю резервную копию..."
 
 mkdir -p "${BACKUP_ROOT}"
 
@@ -391,7 +392,7 @@ cp -a /etc/fail2ban "${BACKUP_ROOT}/fail2ban"
 log "Backup: ${BACKUP_ROOT}"
 
 # ============================================================
-# SSH authorized_keys
+# authorized_keys
 # ============================================================
 
 echo
@@ -414,7 +415,7 @@ fi
 log "SSH public key установлен."
 
 # ============================================================
-# Temporary SSH config
+# Temporary SSH configuration
 # ============================================================
 
 CONFIG_FILE="/etc/ssh/sshd_config.d/00-vps-hardening.conf"
@@ -429,7 +430,6 @@ Port ${CURRENT_SSH_PORT}
 Port ${SSH_PORT}
 
 PubkeyAuthentication yes
-
 PermitRootLogin prohibit-password
 
 PasswordAuthentication yes
@@ -438,7 +438,6 @@ EOF
 
 chmod 644 "${CONFIG_FILE}"
 
-# Validate
 sshd -t
 
 log "SSH-конфигурация корректна."
@@ -449,7 +448,7 @@ log "SSH-конфигурация корректна."
 
 echo
 echo "============================================================"
-echo " UFW"
+echo " Настройка UFW"
 echo "============================================================"
 echo
 
@@ -458,10 +457,10 @@ ufw --force reset
 ufw default deny incoming
 ufw default allow outgoing
 
-# Старый порт оставляем.
+# Старый SSH-порт.
 ufw allow "${CURRENT_SSH_PORT}/tcp" comment "Temporary old SSH"
 
-# Новый порт добавляем.
+# Новый SSH-порт.
 ufw allow "${SSH_PORT}/tcp" comment "New SSH"
 
 for port in "${ADDITIONAL_PORTS[@]}"; do
@@ -483,10 +482,6 @@ systemctl restart "${SSH_SERVICE}"
 
 sleep 2
 
-# ============================================================
-# Verify ports
-# ============================================================
-
 if ! ss -ltn | grep -Eq ":${CURRENT_SSH_PORT}[[:space:]]"; then
     die "Старый SSH-порт ${CURRENT_SSH_PORT} не слушается."
 fi
@@ -499,7 +494,7 @@ log "Старый SSH-порт ${CURRENT_SSH_PORT} работает."
 log "Новый SSH-порт ${SSH_PORT} работает."
 
 # ============================================================
-# Manual test
+# Manual SSH test
 # ============================================================
 
 echo
@@ -514,7 +509,7 @@ echo "Открой ВТОРОЙ терминал на своём компьют�
 echo
 echo "Выполни:"
 echo
-echo "  ssh -i ${KEY_PATH} -p ${SSH_PORT} root@SERVER_IP"
+echo "  ssh -i ~/.ssh/${KEY_NAME} -p ${SSH_PORT} root@SERVER_IP"
 echo
 echo "Если подключение успешно, во втором терминале выполни:"
 echo
@@ -537,12 +532,12 @@ if ! confirm "Новый SSH-вход успешно работает"; then
 fi
 
 # ============================================================
-# FINAL SSH CONFIG
+# Final SSH configuration
 # ============================================================
 
 echo
 echo "============================================================"
-echo " Финальная SSH-настройка"
+echo " Финальная SSH-конфигурация"
 echo "============================================================"
 echo
 
@@ -552,7 +547,6 @@ cat > "${CONFIG_FILE}" <<EOF
 Port ${SSH_PORT}
 
 PubkeyAuthentication yes
-
 PermitRootLogin prohibit-password
 
 PasswordAuthentication no
@@ -592,7 +586,7 @@ log "Старый SSH-порт ${CURRENT_SSH_PORT} удалён из UFW."
 
 echo
 echo "============================================================"
-echo " Fail2ban"
+echo " Настройка Fail2ban"
 echo "============================================================"
 echo
 
@@ -711,15 +705,11 @@ echo "  Password:      OFF"
 echo
 echo "Подключение:"
 echo
-echo "  ssh -i ${KEY_PATH} -p ${SSH_PORT} root@SERVER_IP"
-echo
-echo "Локальный ключ:"
-echo
-echo "  ${KEY_PATH}"
+echo "  ssh -i ~/.ssh/${KEY_NAME} -p ${SSH_PORT} root@SERVER_IP"
 echo
 echo "Public key:"
 echo
-echo "  ${PUBLIC_KEY_PATH}"
+echo "  ~/.ssh/${KEY_NAME}.pub"
 echo
 echo "UFW:"
 echo "  Incoming:      DENY"
@@ -749,6 +739,6 @@ echo " СОХРАНИ ЭТИ ДАННЫЕ"
 echo "============================================================"
 echo
 echo "SSH port: ${SSH_PORT}"
-echo "SSH command: ssh -i ${KEY_PATH} -p ${SSH_PORT} root@SERVER_IP"
+echo "SSH command: ssh -i ~/.ssh/${KEY_NAME} -p ${SSH_PORT} root@SERVER_IP"
 echo "Backup: ${BACKUP_ROOT}"
 echo
