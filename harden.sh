@@ -511,11 +511,11 @@ echo "Выполни:"
 echo
 echo "  ssh -i ~/.ssh/${KEY_NAME} -p ${SSH_PORT} root@SERVER_IP"
 echo
-echo "Если подключение успешно, во втором терминале выполни:"
+echo "Теперь открой второй терминал и проверь подключение:"
 echo
-echo "  echo 'NEW SSH CONNECTION OK'"
+echo "  ssh -i ~/.ssh/${KEY_NAME} -p ${SSH_PORT} root@SERVER_IP"
 echo
-echo "После этого вернись сюда."
+echo "Если подключение успешно, вернись сюда."
 echo
 
 if ! confirm "Новый SSH-вход успешно работает"; then
