@@ -2,97 +2,115 @@
 
 set -Eeuo pipefail
 
-# ============================================================
-# Ubuntu 24.04 VPS Hardening
-# ============================================================
-
 SCRIPT_NAME="VPS Hardening"
+CONFIG_FILE="/etc/ssh/sshd_config.d/00-vps-hardening.conf"
+BACKUP_ROOT="/root/vps-hardening-backup-$(date +%Y%m%d-%H%M%S)"
 
-# 00- prefix is intentional:
-# sshd uses the first value it encounters for most directives.
-SSH_HARDENING_CONFIG="/etc/ssh/sshd_config.d/00-vps-hardening.conf"
-
-FAIL2BAN_CONFIG="/etc/fail2ban/jail.d/sshd-vps-hardening.local"
-
-BACKUP_DIR="/root/vps-hardening-backup-$(date +%Y%m%d-%H%M%S)"
-
-# ------------------------------------------------------------
-# Colors
-# ------------------------------------------------------------
+# ============================================================
+# Colors / output
+# ============================================================
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
 NC='\033[0m'
 
-# ------------------------------------------------------------
-# Output helpers
-# ------------------------------------------------------------
-
-info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+log() {
+    echo -e "${GREEN}[ OK ]${NC} $*"
 }
 
-success() {
-    echo -e "${GREEN}[ OK ]${NC} $1"
-}
-
-warning() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
-}
-
-error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+warn() {
+    echo -e "${YELLOW}[WARN]${NC} $*"
 }
 
 die() {
-    error "$1"
+    echo -e "${RED}[ERROR]${NC} $*" >&2
     exit 1
 }
 
-# ------------------------------------------------------------
-# Error handler
-# ------------------------------------------------------------
+trap 'die "Скрипт завершился с ошибкой на строке $LINENO."' ERR
 
-trap 'error "Скрипт завершился с ошибкой на строке $LINENO."' ERR
+# ============================================================
+# Interactive input
+# ============================================================
 
-# ------------------------------------------------------------
-# Root check
-# ------------------------------------------------------------
+ask() {
+    local prompt="$1"
+    local default="${2:-}"
+    local answer=""
+
+    if [[ -n "$default" ]]; then
+        read -r -p "$prompt [$default]: " answer < /dev/tty || true
+        echo "${answer:-$default}"
+    else
+        read -r -p "$prompt: " answer < /dev/tty || true
+        echo "$answer"
+    fi
+}
+
+confirm() {
+    local answer=""
+
+    while true; do
+        read -r -p "$1 [y/N]: " answer < /dev/tty || true
+
+        case "$answer" in
+            y|Y|yes|YES|д|Д|да|ДА)
+                return 0
+                ;;
+            n|N|no|NO|н|Н|нет|НЕТ|"")
+                return 1
+                ;;
+            *)
+                echo "Введите y или n."
+                ;;
+        esac
+    done
+}
+
+pause() {
+    echo
+    read -r -p "Нажми Enter для продолжения..." _ < /dev/tty || true
+}
+
+# ============================================================
+# Root
+# ============================================================
 
 if [[ "${EUID}" -ne 0 ]]; then
-    die "Запусти скрипт от root: sudo ./harden.sh"
+    die "Запусти скрипт от root: sudo bash harden.sh"
 fi
 
-# ------------------------------------------------------------
+# ============================================================
 # OS check
-# ------------------------------------------------------------
+# ============================================================
 
-if [[ ! -f /etc/os-release ]]; then
-    die "Не удалось определить операционную систему."
+if [[ ! -r /etc/os-release ]]; then
+    die "Не найден /etc/os-release."
 fi
 
 source /etc/os-release
 
-if [[ "${ID}" != "ubuntu" || "${VERSION_ID}" != "24.04" ]]; then
-    die "Этот скрипт рассчитан на Ubuntu 24.04 LTS. Обнаружено: ${PRETTY_NAME}"
+if [[ "${ID}" != "ubuntu" ]]; then
+    die "Поддерживается только Ubuntu."
 fi
 
-success "Обнаружена Ubuntu 24.04 LTS."
+if [[ "${VERSION_ID}" != "24.04" ]]; then
+    die "Ожидалась Ubuntu 24.04 LTS, обнаружена ${PRETTY_NAME}."
+fi
 
-# ------------------------------------------------------------
-# Basic information
-# ------------------------------------------------------------
+log "Обнаружена Ubuntu 24.04 LTS."
 
-HOSTNAME_VALUE="$(hostname -s)"
+# ============================================================
+# Header
+# ============================================================
 
 echo
 echo "============================================================"
-echo " ${SCRIPT_NAME}"
+echo " $SCRIPT_NAME"
 echo "============================================================"
 echo
-echo "Hostname: ${HOSTNAME_VALUE}"
+echo "Hostname: $(hostname)"
 echo
 echo "ВНИМАНИЕ:"
 echo
@@ -104,591 +122,495 @@ echo "  5. Только после успешной проверки стары�
 echo "     и парольная авторизация будут отключены."
 echo
 
-read -rp "Продолжить? [y/N]: " CONFIRM
-
-if [[ ! "${CONFIRM}" =~ ^[Yy]$ ]]; then
+if ! confirm "Продолжить?"; then
     echo "Отменено."
     exit 0
 fi
 
-# ------------------------------------------------------------
-# Install/update package information
-# ------------------------------------------------------------
+# ============================================================
+# Basic variables
+# ============================================================
 
-info "Обновляем список пакетов..."
+HOSTNAME_VALUE="$(hostname)"
+
+# ============================================================
+# Package installation / updates
+# ============================================================
+
+echo
+echo "============================================================"
+echo " Обновление системы"
+echo "============================================================"
+echo
+
+export DEBIAN_FRONTEND=noninteractive
 
 apt-get update
 
-info "Устанавливаем необходимые пакеты..."
-
-DEBIAN_FRONTEND=noninteractive apt-get install -y \
+apt-get install -y \
     openssh-server \
     ufw \
     fail2ban \
     unattended-upgrades
 
-success "Необходимые пакеты установлены."
+apt-get full-upgrade -y
 
-# ------------------------------------------------------------
+log "Система обновлена."
+
+# ============================================================
+# Normalize SSH socket/service
+# ============================================================
+
+echo
+echo "============================================================"
+echo " Проверка SSH"
+echo "============================================================"
+echo
+
+# Ubuntu может использовать ssh.socket.
+# Для нашего сценария проще использовать обычный ssh.service.
+
+if systemctl is-active --quiet ssh.socket 2>/dev/null; then
+    warn "Обнаружен активный ssh.socket."
+
+    systemctl disable --now ssh.socket
+
+    systemctl enable ssh.service
+    systemctl start ssh.service
+
+    log "Переключено с ssh.socket на ssh.service."
+else
+    systemctl enable ssh.service
+    systemctl start ssh.service
+fi
+
+SSH_SERVICE="ssh.service"
+
+# ============================================================
 # Detect current SSH port
-# ------------------------------------------------------------
-
-info "Определяем текущий SSH-порт..."
+# ============================================================
 
 CURRENT_SSH_PORT="$(
     ss -ltnp 2>/dev/null |
-        awk '
-            /sshd/ {
-                n = split($4, parts, ":")
-                port = parts[n]
-
-                if (port ~ /^[0-9]+$/) {
-                    print port
-                    exit
-                }
-            }
-        '
+        grep -E 'sshd|/sshd' |
+        sed -n 's/.*:\([0-9]\+\) .*sshd.*/\1/p' |
+        head -n1
 )"
 
 if [[ -z "${CURRENT_SSH_PORT}" ]]; then
-    CURRENT_SSH_PORT="22"
-    warning "Не удалось определить порт sshd. Используем 22."
+    CURRENT_SSH_PORT="$(
+        ss -ltn 2>/dev/null |
+            awk '$4 ~ /:[0-9]+$/ {
+                sub(/^.*:/, "", $4);
+                if ($4 ~ /^[0-9]+$/) {
+                    print $4;
+                    exit
+                }
+            }'
+    )"
 fi
 
-success "Текущий SSH-порт: ${CURRENT_SSH_PORT}"
-
-# ------------------------------------------------------------
-# Detect SSH service
-# ------------------------------------------------------------
-
-if systemctl is-active --quiet ssh.service; then
-    SSH_SERVICE="ssh.service"
-elif systemctl is-active --quiet sshd.service; then
-    SSH_SERVICE="sshd.service"
-else
-    die "SSH service не запущен."
+if [[ -z "${CURRENT_SSH_PORT}" ]]; then
+    die "Не удалось определить текущий SSH-порт."
 fi
 
-success "SSH service: ${SSH_SERVICE}"
+log "Текущий SSH-порт: ${CURRENT_SSH_PORT}"
 
-# ------------------------------------------------------------
-# Ask for new SSH port
-# ------------------------------------------------------------
+# ============================================================
+# New SSH port
+# ============================================================
 
 echo
-echo "------------------------------------------------------------"
-echo "Новый SSH-порт"
-echo "------------------------------------------------------------"
+echo "Выбери новый SSH-порт."
+echo "Рекомендуется использовать порт выше 1024, например 2222, 22022 и т.п."
 echo
 
 while true; do
-    read -rp "Новый SSH-порт [22222]: " SSH_PORT
+    SSH_PORT="$(ask "Новый SSH-порт")"
 
-    SSH_PORT="${SSH_PORT:-22222}"
-
-    if ! [[ "${SSH_PORT}" =~ ^[0-9]+$ ]]; then
-        warning "Порт должен быть числом."
+    if [[ ! "${SSH_PORT}" =~ ^[0-9]+$ ]]; then
+        echo "Порт должен быть числом."
         continue
     fi
 
     if (( SSH_PORT < 1024 || SSH_PORT > 65535 )); then
-        warning "Используй порт от 1024 до 65535."
+        echo "Используй порт от 1024 до 65535."
         continue
     fi
 
     if [[ "${SSH_PORT}" == "${CURRENT_SSH_PORT}" ]]; then
-        warning "Новый порт совпадает с текущим SSH-портом."
+        echo "Новый порт должен отличаться от текущего."
         continue
     fi
 
-    if ss -ltn | awk '{print $4}' | grep -Eq ":${SSH_PORT}$"; then
-        warning "Порт ${SSH_PORT} уже используется."
+    if ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq ":${SSH_PORT}$"; then
+        echo "Этот порт уже занят."
         continue
     fi
 
     break
 done
 
-success "Новый SSH-порт: ${SSH_PORT}"
+log "Новый SSH-порт: ${SSH_PORT}"
 
-# ------------------------------------------------------------
-# SSH key instructions
-# ------------------------------------------------------------
+# ============================================================
+# SSH key name
+# ============================================================
 
-KEY_NAME="vps_${HOSTNAME_VALUE}_root_ed25519"
-
-echo
-echo "------------------------------------------------------------"
-echo "SSH public key"
-echo "------------------------------------------------------------"
-echo
-
-echo "Теперь открой ВТОРОЙ терминал НА СВОЁМ КОМПЬЮТЕРЕ."
-echo
-echo "Рекомендуемое имя ключа:"
-echo
-echo "  ~/.ssh/${KEY_NAME}"
-echo
-echo "Если такой файл уже существует, НЕ перезаписывай его."
-echo "Используй другое имя, например:"
-echo
-echo "  ~/.ssh/${KEY_NAME}_2"
-echo
-echo "Создание ключа:"
-echo
-echo "  ssh-keygen -t ed25519 -f ~/.ssh/${KEY_NAME}"
-echo
-echo "Можно задать passphrase для приватного ключа."
-echo
-echo "После создания выполни:"
-echo
-echo "  cat ~/.ssh/${KEY_NAME}.pub"
-echo
-echo "и вставь сюда всю строку public key."
-echo
-
-read -rp "Нажми Enter, когда public key будет готов..."
-
-# ------------------------------------------------------------
-# Ask for public key
-# ------------------------------------------------------------
-
-while true; do
-
-    echo
-    read -rp "Вставь SSH public key: " SSH_PUBLIC_KEY
-
-    SSH_PUBLIC_KEY="$(echo "${SSH_PUBLIC_KEY}" | xargs)"
-
-    if [[ "${SSH_PUBLIC_KEY}" =~ ^ssh-ed25519[[:space:]][^[:space:]]+([[:space:]].*)?$ ]]; then
-        break
-    fi
-
-    if [[ "${SSH_PUBLIC_KEY}" =~ ^ecdsa-sha2-nistp256[[:space:]][^[:space:]]+([[:space:]].*)?$ ]]; then
-        break
-    fi
-
-    if [[ "${SSH_PUBLIC_KEY}" =~ ^ssh-rsa[[:space:]][^[:space:]]+([[:space:]].*)?$ ]]; then
-        warning "RSA-ключ принят."
-        warning "Для нового ключа предпочтителен Ed25519."
-        break
-    fi
-
-    warning "Не удалось распознать SSH public key."
-    echo
-    echo "Пример:"
-    echo
-    echo "ssh-ed25519 AAAA... comment"
-    echo
-done
-
-success "SSH public key принят."
-
-# ------------------------------------------------------------
-# Ask for additional ports
-# ------------------------------------------------------------
+DEFAULT_KEY_NAME="vps_${HOSTNAME_VALUE}_root_ed25519"
 
 echo
-echo "------------------------------------------------------------"
-echo "Дополнительные TCP-порты"
-echo "------------------------------------------------------------"
+echo "============================================================"
+echo " SSH-ключ"
+echo "============================================================"
 echo
-
-echo "Сейчас слушают:"
-echo
-
-ss -ltnp || true
-
-echo
-echo "Укажи порты, которые должны быть доступны"
-echo "ИЗ ИНТЕРНЕТА."
+echo "Создай новый ключ на СВОЁМ компьютере во втором терминале."
 echo
 echo "Например:"
 echo
-echo "  80 443"
+echo "  ssh-keygen -t ed25519 -f ~/.ssh/${DEFAULT_KEY_NAME}"
 echo
-echo "Если дополнительных портов нет — Enter."
+echo "Если такой файл уже существует — выбери другое имя."
 echo
-echo "Не открывай PostgreSQL, Redis и другие внутренние"
-echo "сервисы без необходимости."
+echo "После создания выполни:"
+echo
+echo "  cat ~/.ssh/${DEFAULT_KEY_NAME}.pub"
+echo
+echo "И вставь сюда содержимое .pub-файла."
 echo
 
-read -rp "Дополнительные TCP-порты: " ADDITIONAL_PORTS
+KEY_NAME="$(ask "Имя ключа без ~/.ssh/ [${DEFAULT_KEY_NAME}]" "${DEFAULT_KEY_NAME}")"
 
-# ------------------------------------------------------------
-# Configuration summary
-# ------------------------------------------------------------
+if [[ ! "${KEY_NAME}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    die "Недопустимое имя ключа."
+fi
+
+KEY_PATH_DISPLAY="~/.ssh/${KEY_NAME}"
+KEY_PUBLIC_PATH_DISPLAY="${KEY_PATH_DISPLAY}.pub"
+
+echo
+echo "На локальном компьютере выполни:"
+echo
+echo "  ssh-keygen -t ed25519 -f ${KEY_PATH_DISPLAY}"
+echo
+echo "Затем:"
+echo
+echo "  cat ${KEY_PUBLIC_PATH_DISPLAY}"
+echo
+
+while true; do
+    SSH_PUBLIC_KEY="$(ask "Вставь SSH public key")"
+
+    # trim leading/trailing whitespace without changing internal spaces
+    SSH_PUBLIC_KEY="${SSH_PUBLIC_KEY#"${SSH_PUBLIC_KEY%%[![:space:]]*}"}"
+    SSH_PUBLIC_KEY="${SSH_PUBLIC_KEY%"${SSH_PUBLIC_KEY##*[![:space:]]}"}"
+
+    if [[ "${SSH_PUBLIC_KEY}" =~ ^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521)[[:space:]]+[A-Za-z0-9+/=]+([[:space:]].*)?$ ]]; then
+        break
+    fi
+
+    echo
+    echo "Похоже, это невалидный SSH public key."
+    echo "Ожидается строка вида:"
+    echo
+    echo "  ssh-ed25519 AAAA..."
+    echo
+done
+
+log "SSH public key принят."
+
+# ============================================================
+# Additional TCP ports
+# ============================================================
 
 echo
 echo "============================================================"
-echo "Проверь настройки"
+echo " Дополнительные TCP-порты"
 echo "============================================================"
 echo
-echo "Current SSH port:        ${CURRENT_SSH_PORT}"
-echo "New SSH port:            ${SSH_PORT}"
-echo "Root login:              разрешён"
-echo "Root authentication:     public key"
-echo "Password auth:           отключится после проверки"
-echo "Additional TCP ports:    ${ADDITIONAL_PORTS:-нет}"
-echo "UFW:                     включить"
-echo "Fail2ban:                включить"
-echo "Automatic updates:       включить"
+echo "Например:"
+echo "  80,443"
+echo
+echo "Если дополнительные порты не нужны — оставь пустым."
+echo
+
+ADDITIONAL_PORTS_RAW="$(ask "Дополнительные TCP-порты")"
+
+ADDITIONAL_PORTS=()
+
+if [[ -n "${ADDITIONAL_PORTS_RAW}" ]]; then
+    IFS=',' read -ra PORT_LIST <<< "${ADDITIONAL_PORTS_RAW}"
+
+    for port in "${PORT_LIST[@]}"; do
+        port="$(echo "${port}" | xargs)"
+
+        if [[ ! "${port}" =~ ^[0-9]+$ ]]; then
+            die "Некорректный TCP-порт: ${port}"
+        fi
+
+        if (( port < 1 || port > 65535 )); then
+            die "Порт вне диапазона 1-65535: ${port}"
+        fi
+
+        if [[ "${port}" == "${CURRENT_SSH_PORT}" || "${port}" == "${SSH_PORT}" ]]; then
+            die "SSH-порт не нужно добавлять в список дополнительных портов."
+        fi
+
+        ADDITIONAL_PORTS+=("${port}")
+    done
+fi
+
+# ============================================================
+# Summary / confirmation
+# ============================================================
+
 echo
 echo "============================================================"
+echo " Параметры"
+echo "============================================================"
+echo
+echo "Hostname:             ${HOSTNAME_VALUE}"
+echo "Старый SSH-порт:      ${CURRENT_SSH_PORT}"
+echo "Новый SSH-порт:       ${SSH_PORT}"
+echo "Root SSH:             разрешён"
+echo "Пароль SSH:           будет отключён после проверки"
+echo "SSH key:              ${KEY_PATH_DISPLAY}"
+echo "Доп. TCP-порты:       ${ADDITIONAL_PORTS_RAW:-нет}"
 echo
 
-read -rp "Все правильно? [y/N]: " CONFIRM
-
-if [[ ! "${CONFIRM}" =~ ^[Yy]$ ]]; then
+if ! confirm "Начать настройку?"; then
     echo "Отменено."
     exit 0
 fi
 
-# ------------------------------------------------------------
+# ============================================================
 # Backup
-# ------------------------------------------------------------
+# ============================================================
 
-info "Создаём резервную копию конфигурации..."
+echo
+echo "============================================================"
+echo " Создание резервной копии"
+echo "============================================================"
+echo
 
-mkdir -p "${BACKUP_DIR}"
+mkdir -p "${BACKUP_ROOT}"
 
-if [[ -d /etc/ssh ]]; then
-    cp -a /etc/ssh "${BACKUP_DIR}/ssh"
-fi
+cp -a /etc/ssh "${BACKUP_ROOT}/ssh"
+cp -a /etc/ufw "${BACKUP_ROOT}/ufw"
+cp -a /etc/fail2ban "${BACKUP_ROOT}/fail2ban"
 
-if [[ -d /etc/ufw ]]; then
-    cp -a /etc/ufw "${BACKUP_DIR}/ufw"
-fi
+log "Backup: ${BACKUP_ROOT}"
 
-if [[ -d /etc/fail2ban ]]; then
-    cp -a /etc/fail2ban "${BACKUP_DIR}/fail2ban"
-fi
+# ============================================================
+# Authorized keys
+# ============================================================
 
-success "Backup создан:"
-echo "  ${BACKUP_DIR}"
-
-# ------------------------------------------------------------
-# System upgrade
-# ------------------------------------------------------------
-
-info "Обновляем систему..."
-
-DEBIAN_FRONTEND=noninteractive apt-get \
-    -o Dpkg::Options::="--force-confold" \
-    full-upgrade -y
-
-success "Система обновлена."
-
-# ------------------------------------------------------------
-# Configure authorized_keys
-# ------------------------------------------------------------
-
-info "Настраиваем /root/.ssh/authorized_keys..."
+echo
+echo "============================================================"
+echo " Установка SSH-ключа"
+echo "============================================================"
+echo
 
 mkdir -p /root/.ssh
-
 chmod 700 /root/.ssh
 
 touch /root/.ssh/authorized_keys
-
 chmod 600 /root/.ssh/authorized_keys
+chown -R root:root /root/.ssh
 
-if grep -Fqx "${SSH_PUBLIC_KEY}" /root/.ssh/authorized_keys; then
-    success "Public key уже существует."
-else
+if ! grep -Fqx "${SSH_PUBLIC_KEY}" /root/.ssh/authorized_keys; then
     echo "${SSH_PUBLIC_KEY}" >> /root/.ssh/authorized_keys
-    success "Public key добавлен."
 fi
 
-# ------------------------------------------------------------
-# Create temporary SSH configuration
-# ------------------------------------------------------------
+log "SSH public key установлен."
 
-info "Настраиваем SSH."
-
-cat > "${SSH_HARDENING_CONFIG}" <<EOF
 # ============================================================
+# Temporary SSH configuration
+# ============================================================
+
+echo
+echo "============================================================"
+echo " Временная SSH-конфигурация"
+echo "============================================================"
+echo
+
+cat > "${CONFIG_FILE}" <<EOF
 # Managed by VPS Hardening
-# ============================================================
-
-# Temporary transition:
-# both old and new SSH ports are active until manual verification.
+# Temporary configuration
 
 Port ${CURRENT_SSH_PORT}
 Port ${SSH_PORT}
 
 PubkeyAuthentication yes
-
-# Root login is allowed only with public key authentication.
 PermitRootLogin prohibit-password
 
-# Password authentication remains temporarily enabled.
-# It will be disabled after manual verification.
+# Password remains globally enabled temporarily,
+# but root password login is blocked by PermitRootLogin.
 PasswordAuthentication yes
 KbdInteractiveAuthentication yes
 EOF
 
-chmod 600 "${SSH_HARDENING_CONFIG}"
+chmod 644 "${CONFIG_FILE}"
 
-# ------------------------------------------------------------
-# Validate SSH configuration
-# ------------------------------------------------------------
+# Validate before restart.
+sshd -t
 
-info "Проверяем конфигурацию SSH..."
+log "SSH-конфигурация прошла проверку."
 
-if ! sshd -t; then
-    error "Конфигурация SSH содержит ошибку."
-    error "Backup: ${BACKUP_DIR}"
-    exit 1
-fi
+# ============================================================
+# UFW
+# ============================================================
 
-success "Конфигурация SSH корректна."
+echo
+echo "============================================================"
+echo " Настройка UFW"
+echo "============================================================"
+echo
 
-# ------------------------------------------------------------
-# Configure UFW
-# ------------------------------------------------------------
-
-info "Настраиваем UFW..."
+ufw --force reset
 
 ufw default deny incoming
 ufw default allow outgoing
 
-# Keep current SSH port available during transition.
-ufw allow "${CURRENT_SSH_PORT}/tcp" comment 'Temporary old SSH'
+# IMPORTANT:
+# Keep BOTH ports available until the new SSH login is tested.
+ufw allow "${CURRENT_SSH_PORT}/tcp" comment "Temporary old SSH"
+ufw allow "${SSH_PORT}/tcp" comment "New SSH"
 
-# Allow new SSH port.
-ufw allow "${SSH_PORT}/tcp" comment 'SSH new port'
+for port in "${ADDITIONAL_PORTS[@]}"; do
+    ufw allow "${port}/tcp" comment "Additional TCP"
+done
 
-# Additional ports.
-if [[ -n "${ADDITIONAL_PORTS}" ]]; then
+ufw --force enable
 
-    for PORT in ${ADDITIONAL_PORTS}; do
+log "UFW включён."
 
-        if ! [[ "${PORT}" =~ ^[0-9]+$ ]]; then
-            warning "Некорректный порт пропущен: ${PORT}"
-            continue
-        fi
-
-        if (( PORT < 1 || PORT > 65535 )); then
-            warning "Порт вне диапазона пропущен: ${PORT}"
-            continue
-        fi
-
-        if [[ "${PORT}" == "${CURRENT_SSH_PORT}" ||
-              "${PORT}" == "${SSH_PORT}" ]]; then
-            continue
-        fi
-
-        ufw allow "${PORT}/tcp" comment 'User requested'
-    done
-
-fi
-
-# ------------------------------------------------------------
-# Enable UFW
-# ------------------------------------------------------------
-
-if ufw status | grep -q "Status: active"; then
-    success "UFW уже активен."
-else
-    info "Включаем UFW..."
-    ufw --force enable
-    success "UFW включён."
-fi
-
-# ------------------------------------------------------------
-# SSH service / socket handling
-# ------------------------------------------------------------
-
-if systemctl is-active --quiet ssh.socket; then
-
-    warning "Обнаружен ssh.socket."
-
-    systemctl disable --now ssh.socket
-    systemctl enable ssh.service
-
-    success "Переходим на обычный ssh.service."
-
-fi
-
-# ------------------------------------------------------------
+# ============================================================
 # Restart SSH
-# ------------------------------------------------------------
+# ============================================================
 
-info "Перезапускаем SSH..."
+echo
+echo "Перезапускаю SSH..."
 
 systemctl restart "${SSH_SERVICE}"
 
-sleep 1
+sleep 2
 
-if ! systemctl is-active --quiet "${SSH_SERVICE}"; then
-    error "SSH service не запустился."
-    error "НЕ закрывай текущую SSH-сессию."
-    error "Backup: ${BACKUP_DIR}"
-    exit 1
-fi
+# ============================================================
+# Verify both ports
+# ============================================================
 
-success "SSH перезапущен."
-
-# ------------------------------------------------------------
-# Verify both ports locally
-# ------------------------------------------------------------
-
-info "Проверяем SSH-порты..."
+echo
+echo "Проверка SSH-портов..."
 
 if ! ss -ltn | grep -Eq ":${CURRENT_SSH_PORT}[[:space:]]"; then
-    warning "Старый SSH-порт ${CURRENT_SSH_PORT} не обнаружен."
+    die "Старый SSH-порт ${CURRENT_SSH_PORT} не слушается."
 fi
 
 if ! ss -ltn | grep -Eq ":${SSH_PORT}[[:space:]]"; then
-    error "Новый SSH-порт ${SSH_PORT} не слушается."
-    error "НЕ закрывай текущую SSH-сессию."
-    exit 1
+    die "Новый SSH-порт ${SSH_PORT} не слушается."
 fi
 
-success "Новый SSH-порт ${SSH_PORT} слушается."
+log "Старый порт ${CURRENT_SSH_PORT} работает."
+log "Новый порт ${SSH_PORT} работает."
 
-# ------------------------------------------------------------
-# Manual verification
-# ------------------------------------------------------------
+# ============================================================
+# Manual SSH test
+# ============================================================
 
-echo
 echo
 echo "============================================================"
-echo " ОБЯЗАТЕЛЬНАЯ ПРОВЕРКА SSH"
+echo " ПРОВЕРКА НОВОГО SSH-ПОДКЛЮЧЕНИЯ"
 echo "============================================================"
 echo
-echo "ТЕКУЩИЙ ТЕРМИНАЛ НЕ ЗАКРЫВАЙ."
+echo "НЕ ЗАКРЫВАЙ ЭТУ СЕССИЮ."
 echo
-echo "Открой ВТОРОЙ терминал на своём компьютере."
+echo "Открой второй терминал на своём компьютере."
 echo
 echo "Выполни:"
 echo
-echo "  ssh -i ~/.ssh/${KEY_NAME} -p ${SSH_PORT} root@SERVER_IP"
+echo "  ssh -i ${KEY_PATH_DISPLAY} -p ${SSH_PORT} root@SERVER_IP"
 echo
-echo "Если ты использовал другое имя ключа — укажи его вместо"
-echo "${KEY_NAME}."
+echo "После успешного входа выполни во втором терминале:"
 echo
-echo "В новом терминале должен произойти вход БЕЗ пароля"
-echo "пользователя root."
+echo "  echo 'NEW SSH CONNECTION OK'"
 echo
-echo "После входа выполни:"
+echo "Если всё работает — вернись сюда."
 echo
-echo "  echo \$SSH_CONNECTION"
+
+if ! confirm "Новый SSH-вход успешно проверен?"; then
+    echo
+    warn "Оставляю старый порт и парольную конфигурацию."
+    echo
+    echo "Текущий SSH-порт: ${CURRENT_SSH_PORT}"
+    echo "Новый SSH-порт:   ${SSH_PORT}"
+    echo
+    echo "Скрипт остановлен безопасно."
+    exit 0
+fi
+
+# ============================================================
+# Final SSH hardening
+# ============================================================
+
 echo
-echo "Убедись, что подключение действительно произошло"
-echo "через новый SSH-порт."
-echo
-echo "Если вход НЕ работает:"
-echo
-echo "  НЕ вводи y."
-echo "  Оставь этот терминал открытым."
-echo "  Исправь проблему здесь."
-echo
+echo "============================================================"
+echo " Финальная SSH-конфигурация"
 echo "============================================================"
 echo
 
-read -rp "Новый SSH-вход по ключу успешно работает? [y/N]: " SSH_TEST
-
-if [[ ! "${SSH_TEST}" =~ ^[Yy]$ ]]; then
-
-    warning "Финальный этап НЕ выполнен."
-
-    echo
-    echo "Парольная авторизация остаётся включённой."
-    echo "Старый SSH-порт остаётся разрешённым."
-    echo
-    echo "Текущая конфигурация безопасна для дальнейшей диагностики."
-    echo
-    echo "Backup:"
-    echo "  ${BACKUP_DIR}"
-    echo
-
-    exit 1
-fi
-
-success "Новый SSH-вход подтверждён."
-
-# ------------------------------------------------------------
-# Final SSH configuration
-# ------------------------------------------------------------
-
-info "Переключаем SSH на окончательную конфигурацию..."
-
-cat > "${SSH_HARDENING_CONFIG}" <<EOF
-# ============================================================
+cat > "${CONFIG_FILE}" <<EOF
 # Managed by VPS Hardening
-# ============================================================
 
 Port ${SSH_PORT}
 
 PubkeyAuthentication yes
-
-# Root login is allowed only with public key authentication.
 PermitRootLogin prohibit-password
-
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 EOF
 
-chmod 600 "${SSH_HARDENING_CONFIG}"
+chmod 644 "${CONFIG_FILE}"
 
-# ------------------------------------------------------------
-# Validate final SSH configuration
-# ------------------------------------------------------------
-
-if ! sshd -t; then
-    error "Финальная конфигурация SSH содержит ошибку."
-    error "Старый SSH-порт пока НЕ удалён из UFW."
-    error "Backup: ${BACKUP_DIR}"
-    exit 1
-fi
-
-success "Финальная конфигурация SSH корректна."
-
-# ------------------------------------------------------------
-# Restart SSH with final configuration
-# ------------------------------------------------------------
-
-info "Перезапускаем SSH с финальной конфигурацией..."
+sshd -t
 
 systemctl restart "${SSH_SERVICE}"
 
-sleep 1
+sleep 2
 
-if ! systemctl is-active --quiet "${SSH_SERVICE}"; then
-    error "SSH service не запустился с финальной конфигурацией."
-    error "НЕ закрывай текущую SSH-сессию."
-    error "Backup: ${BACKUP_DIR}"
-    exit 1
+# Verify final SSH port.
+if ! ss -ltn | grep -Eq ":${SSH_PORT}[[:space:]]"; then
+    die "После финального перезапуска SSH новый порт не слушается."
 fi
 
-success "Финальная SSH-конфигурация активна."
+log "Парольная SSH-аутентификация отключена."
+log "Root SSH через public key оставлен."
+log "SSH работает на порту ${SSH_PORT}."
 
-# ------------------------------------------------------------
-# Remove old SSH port from UFW
-# ------------------------------------------------------------
+# ============================================================
+# Remove old UFW rule
+# ============================================================
 
-info "Удаляем старый SSH-порт из UFW..."
+echo
+echo "Удаляю старый SSH-порт из UFW..."
 
-if ufw status | grep -Eq "^${CURRENT_SSH_PORT}/tcp"; then
-    ufw delete allow "${CURRENT_SSH_PORT}/tcp" || true
-fi
+ufw delete allow "${CURRENT_SSH_PORT}/tcp" >/dev/null 2>&1 || true
 
-# Also try to remove the named temporary rule.
-ufw delete allow "${CURRENT_SSH_PORT}/tcp" comment 'Temporary old SSH' 2>/dev/null || true
+log "Старый SSH-порт ${CURRENT_SSH_PORT} удалён из UFW."
 
-success "Старый SSH-порт больше не разрешён через UFW."
+# ============================================================
+# Fail2ban
+# ============================================================
 
-# ------------------------------------------------------------
-# Configure Fail2ban
-# ------------------------------------------------------------
+echo
+echo "============================================================"
+echo " Настройка Fail2ban"
+echo "============================================================"
+echo
 
-info "Настраиваем Fail2ban..."
+mkdir -p /etc/fail2ban/jail.d
 
-mkdir -p "$(dirname "${FAIL2BAN_CONFIG}")"
-
-cat > "${FAIL2BAN_CONFIG}" <<EOF
+cat > /etc/fail2ban/jail.d/sshd.local <<EOF
 [sshd]
 enabled = true
 port = ${SSH_PORT}
@@ -698,193 +620,155 @@ findtime = 10m
 bantime = 1h
 EOF
 
-chmod 644 "${FAIL2BAN_CONFIG}"
-
 systemctl enable fail2ban
 systemctl restart fail2ban
 
-sleep 1
+sleep 2
 
 if systemctl is-active --quiet fail2ban; then
-    success "Fail2ban запущен."
+    log "Fail2ban работает."
 else
-    warning "Fail2ban не запустился."
-    warning "Проверь: systemctl status fail2ban"
+    warn "Fail2ban не запустился. Проверь: systemctl status fail2ban"
 fi
 
-# ------------------------------------------------------------
-# Automatic updates
-# ------------------------------------------------------------
+# ============================================================
+# Unattended upgrades
+# ============================================================
 
-info "Настраиваем автоматические обновления..."
+echo
+echo "============================================================"
+echo " Автоматические обновления"
+echo "============================================================"
+echo
 
 cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
 
-systemctl enable apt-daily.timer
-systemctl enable apt-daily-upgrade.timer
+systemctl enable apt-daily.timer 2>/dev/null || true
+systemctl enable apt-daily-upgrade.timer 2>/dev/null || true
 
-success "Автоматические обновления включены."
+log "Автоматические обновления включены."
 
-# ------------------------------------------------------------
-# Final diagnostics
-# ------------------------------------------------------------
+# ============================================================
+# Final verification
+# ============================================================
 
-echo
 echo
 echo "============================================================"
-echo " VPS HARDENING ЗАВЕРШЁН"
+echo " ФИНАЛЬНАЯ ПРОВЕРКА"
 echo "============================================================"
 echo
 
-echo "SYSTEM"
-echo "------------------------------------------------------------"
-echo "OS:              ${PRETTY_NAME}"
-echo "Hostname:        ${HOSTNAME_VALUE}"
-echo
+echo "----- OS -----"
+echo "${PRETTY_NAME}"
 
-echo "SSH"
-echo "------------------------------------------------------------"
-echo "Old port:        ${CURRENT_SSH_PORT}"
-echo "New port:        ${SSH_PORT}"
-echo "User:            root"
-echo "Root login:      public key only"
-echo "Password auth:   disabled"
-echo "Public key:      installed"
 echo
+echo "----- Hostname -----"
+echo "${HOSTNAME_VALUE}"
 
-echo "UFW"
-echo "------------------------------------------------------------"
+echo
+echo "----- SSH -----"
+echo "SSH service:          ${SSH_SERVICE}"
+echo "SSH port:             ${SSH_PORT}"
+echo "Root login:           prohibit-password"
+echo "Password auth:        disabled"
+echo "Public key auth:      enabled"
+echo "Private key (local):  ${KEY_PATH_DISPLAY}"
+
+echo
+echo "----- Listening ports -----"
+ss -ltnp | grep -E 'sshd|:80 |:443 |:36028 ' || true
+
+echo
+echo "----- UFW -----"
 ufw status verbose
 echo
-
-echo "UFW numbered rules"
-echo "------------------------------------------------------------"
 ufw status numbered
+
 echo
+echo "----- Fail2ban -----"
+fail2ban-client status || true
 
-echo "LISTENING TCP PORTS"
-echo "------------------------------------------------------------"
-ss -ltnp
 echo
+echo "----- SSH effective config -----"
 
-echo "FAIL2BAN"
-echo "------------------------------------------------------------"
-
-if systemctl is-active --quiet fail2ban; then
-    echo "Service: active"
-    fail2ban-client status sshd 2>/dev/null || true
+if sshd -T >/tmp/vps-hardening-sshd-test.txt 2>/dev/null; then
+    grep -E '^(port|permitrootlogin|pubkeyauthentication|passwordauthentication|kbdinteractiveauthentication) ' \
+        /tmp/vps-hardening-sshd-test.txt || true
 else
-    echo "Service: inactive"
+    warn "Не удалось получить полный sshd -T вывод."
 fi
 
-echo
-
-echo "SSH EFFECTIVE CONFIGURATION"
-echo "------------------------------------------------------------"
-
-if SSH_CONFIG="$(sshd -T 2>&1)"; then
-
-    echo "${SSH_CONFIG}" |
-        grep -E \
-        '^(port|permitrootlogin|pubkeyauthentication|passwordauthentication|kbdinteractiveauthentication) '
-
-else
-
-    warning "Не удалось получить effective SSH configuration."
-    echo "${SSH_CONFIG}"
-fi
+rm -f /tmp/vps-hardening-sshd-test.txt
 
 echo
-
-echo "SERVICES"
-echo "------------------------------------------------------------"
-echo "SSH:"
+echo "----- Services -----"
 systemctl is-active "${SSH_SERVICE}" || true
-
-echo "UFW:"
-ufw status | head -n 1
-
-echo "Fail2ban:"
+systemctl is-active ufw || true
 systemctl is-active fail2ban || true
 
-echo
-
-echo "BACKUP"
-echo "------------------------------------------------------------"
-echo "${BACKUP_DIR}"
+# ============================================================
+# Final information
+# ============================================================
 
 echo
-
 echo "============================================================"
-echo " ДАННЫЕ ДЛЯ СОХРАНЕНИЯ"
+echo " ГОТОВО"
 echo "============================================================"
 echo
-
-echo "Server:"
-echo "  ${HOSTNAME_VALUE}"
-
+echo "Сервер:              ${HOSTNAME_VALUE}"
 echo
-
-echo "SSH user:"
-echo "  root"
-
+echo "SSH:"
+echo "  Порт:              ${SSH_PORT}"
+echo "  Root:              public key"
+echo "  Password auth:     OFF"
 echo
-
-echo "SSH port:"
-echo "  ${SSH_PORT}"
-
+echo "Подключение:"
 echo
-
-echo "SSH command:"
-echo "  ssh -p ${SSH_PORT} root@SERVER_IP"
-
+echo "  ssh -i ${KEY_PATH_DISPLAY} -p ${SSH_PORT} root@SERVER_IP"
 echo
-
-echo "SSH command with explicit key:"
-echo "  ssh -i ~/.ssh/${KEY_NAME} -p ${SSH_PORT} root@SERVER_IP"
-
+echo "Локальный ключ:"
 echo
-
-echo "SSH private key:"
-echo "  ~/.ssh/${KEY_NAME}"
-
+echo "  ${KEY_PATH_DISPLAY}"
 echo
-
-echo "SSH public key:"
-echo "  ~/.ssh/${KEY_NAME}.pub"
-
+echo "Публичный ключ:"
 echo
-
-echo "Fail2ban:"
-echo "  sudo fail2ban-client status sshd"
-
+echo "  ${KEY_PUBLIC_PATH_DISPLAY}"
 echo
-
 echo "UFW:"
-echo "  sudo ufw status numbered"
-
+echo "  Incoming:          DENY by default"
+echo "  Outgoing:          ALLOW by default"
+echo "  SSH:               ${SSH_PORT}/tcp"
 echo
 
-echo "SSH configuration:"
-echo "  sudo sshd -t"
+if [[ "${#ADDITIONAL_PORTS[@]}" -gt 0 ]]; then
+    echo "Дополнительные TCP-порты:"
+    for port in "${ADDITIONAL_PORTS[@]}"; do
+        echo "  ${port}/tcp"
+    done
+else
+    echo "Дополнительные TCP-порты: нет"
+fi
 
 echo
-
-echo "SSH logs:"
-echo "  sudo journalctl -u ssh.service -n 50"
-
+echo "Fail2ban:"
+echo "  SSH jail:          enabled"
+echo "  Max retry:         5"
+echo "  Find time:         10m"
+echo "  Ban time:          1h"
 echo
-
+echo "Автоматические обновления: enabled"
+echo
 echo "Backup:"
-echo "  ${BACKUP_DIR}"
-
+echo "  ${BACKUP_ROOT}"
 echo
 echo "============================================================"
+echo " СОХРАНИ ЭТИ ДАННЫЕ"
+echo "============================================================"
 echo
-warning "СОХРАНИ ПРИВАТНЫЙ SSH-КЛЮЧ."
-warning "Без него войти на сервер после отключения пароля будет нельзя."
+echo "SSH port: ${SSH_PORT}"
+echo "SSH command: ssh -i ${KEY_PATH_DISPLAY} -p ${SSH_PORT} root@SERVER_IP"
+echo "Backup: ${BACKUP_ROOT}"
 echo
-success "Готово."
