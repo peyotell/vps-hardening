@@ -15,12 +15,12 @@ LOG_FILE="${LOG_FILE:-/var/log/vps-hardening.log}"
 STATE_FILE="${STATE_FILE:-/var/lib/vps-hardening/state.env}"
 
 log() {
-    echo -e "${GREEN}[ OK ]${NC} $*"
+    echo -e "${GREEN}[ OK ]${NC} $*" >&2
     [[ -n "${LOG_FILE:-}" ]] && echo "[$(date '+%F %T')] [OK] $*" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 warn() {
-    echo -e "${YELLOW}[WARN]${NC} $*"
+    echo -e "${YELLOW}[WARN]${NC} $*" >&2
     [[ -n "${LOG_FILE:-}" ]] && echo "[$(date '+%F %T')] [WARN] $*" >> "$LOG_FILE" 2>/dev/null || true
 }
 
@@ -94,6 +94,56 @@ enable_err_trap() {
 port_in_use() {
     local port="$1"
     ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE ":${port}$"
+}
+
+trim() {
+    echo "${1:-}" | xargs 2>/dev/null || printf '%s' "${1:-}"
+}
+
+is_single_port() {
+    local p="${1:-}"
+    [[ "$p" =~ ^[0-9]+$ ]] && (( p >= 1 && p <= 65535 ))
+}
+
+# Fail fast with the offending value instead of a cryptic `sshd -t` error.
+# Usage: validate_sshd_ports "current" "$CURRENT_SSH_PORT" "new" "$SSH_PORT"
+validate_sshd_ports() {
+    local label1="$1" value1="$2" label2="${3:-}" value2="${4:-}"
+
+    if ! is_single_port "$value1"; then
+        die "Invalid ${label1} SSH port: '${value1}' (need a single number 1-65535, no commas/spaces)."
+    fi
+    if [[ -n "$label2" ]] && ! is_single_port "$value2"; then
+        die "Invalid ${label2} SSH port: '${value2}' (need a single number 1-65535, no commas/spaces)."
+    fi
+}
+
+# sshd -t and `systemctl restart ssh*` require the privilege separation
+# directory. On some systems (containers, cleaned /run) it is missing,
+# which fails with "Missing privilege separation directory: /run/sshd".
+ensure_sshd_runtime_dir() {
+    if [[ ! -d /run/sshd ]]; then
+        mkdir -p /run/sshd
+        chmod 755 /run/sshd
+    fi
+}
+
+# Run `sshd -t`; on failure dump the drop-in so the bad line is visible.
+check_sshd_config() {
+    local dropin="${1:-/etc/ssh/sshd_config.d/99-vps-hardening.conf}"
+    local out=""
+
+    ensure_sshd_runtime_dir
+
+    if out="$(sshd -t 2>&1)"; then
+        return 0
+    fi
+
+    echo "--- ${dropin} ---"
+    cat "$dropin" 2>/dev/null || echo "(drop-in not found: $dropin)"
+    echo "--- sshd -t output ---"
+    echo "$out"
+    die "sshd -t failed. Fix the drop-in above and rerun."
 }
 
 sshd_effective_ports() {
@@ -211,4 +261,39 @@ EOF
 
 load_state() {
     [[ -f "$STATE_FILE" ]] && source "$STATE_FILE"
+    sanitize_state || true
+}
+
+# Self-heal a state file poisoned by an older buggy run
+# (e.g. CURRENT_SSH_PORT containing a warn message instead of a number).
+sanitize_state() {
+    if [[ -n "${CURRENT_SSH_PORT:-}" ]]; then
+        CURRENT_SSH_PORT="$(trim "$CURRENT_SSH_PORT")"
+        if ! is_single_port "$CURRENT_SSH_PORT"; then
+            warn "Ignoring invalid CURRENT_SSH_PORT from state: '${CURRENT_SSH_PORT}'"
+            CURRENT_SSH_PORT=""
+        fi
+    fi
+    if [[ -n "${SSH_PORT:-}" ]]; then
+        SSH_PORT="$(trim "$SSH_PORT")"
+        if ! is_single_port "$SSH_PORT"; then
+            warn "Ignoring invalid SSH_PORT from state: '${SSH_PORT}'"
+            SSH_PORT=""
+        fi
+    fi
+    if [[ -n "${EXTRA_PORTS_CLEAN:-}" ]]; then
+        local clean="" p
+        local -a _arr=()
+        IFS=',' read -ra _arr <<< "$EXTRA_PORTS_CLEAN"
+        for p in "${_arr[@]}"; do
+            p="$(trim "$p")"
+            [[ -z "$p" ]] && continue
+            is_single_port "$p" || continue
+            if [[ -n "$clean" ]]; then
+                clean+=","
+            fi
+            clean+="$p"
+        done
+        EXTRA_PORTS_CLEAN="$clean"
+    fi
 }

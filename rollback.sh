@@ -43,6 +43,7 @@ if [[ -d "$BACKUP/fail2ban" ]]; then
 fi
 rm -f /etc/fail2ban/jail.d/sshd.local
 
+ensure_sshd_runtime_dir
 sshd -t
 
 if systemctl list-unit-files 2>/dev/null | grep -q '^sshd\.service'; then

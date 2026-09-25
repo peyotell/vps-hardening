@@ -6,14 +6,23 @@
 detect_current_ssh_port() {
     local p=""
     p="$(sshd_effective_ports | head -n1 || true)"
+    p="$(trim "$p")"
+
+    if [[ -z "$p" || ! "$p" =~ ^[0-9]+$ ]]; then
+        p=""
+    fi
 
     if [[ -z "$p" ]]; then
         p="$(
             ss -ltnp 2>/dev/null |
-                grep -E 'sshd' |
+                grep -iE 'sshd' |
                 sed -nE 's/.*:([0-9]+).*/\1/p' |
                 head -n1 || true
         )"
+        p="$(trim "$p")"
+        if [[ ! "$p" =~ ^[0-9]+$ ]]; then
+            p=""
+        fi
     fi
 
     if [[ -z "$p" ]]; then
@@ -26,7 +35,7 @@ detect_current_ssh_port() {
 
 prompt_ssh_port() {
     if [[ -n "${CLI_SSH_PORT:-}" ]]; then
-        SSH_PORT="$CLI_SSH_PORT"
+        SSH_PORT="$(trim "$CLI_SSH_PORT")"
         if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || (( SSH_PORT < 1024 || SSH_PORT > 65535 )); then
             die "Invalid --ssh-port: $SSH_PORT (need 1024-65535)."
         fi
@@ -127,14 +136,15 @@ prompt_extra_ports() {
 
     while true; do
         EXTRA_PORTS_CLEAN=""
-        declare -A _seen=()
+        local -A _seen=()
         local _invalid=""
+        local -a PORT_ARRAY=()
 
         if [[ -n "$input" ]]; then
             IFS=',' read -ra PORT_ARRAY <<< "$input"
             local raw PORT
             for raw in "${PORT_ARRAY[@]}"; do
-                PORT="$(echo "$raw" | xargs)"
+                PORT="$(trim "$raw")"
                 [[ -z "$PORT" ]] && continue
 
                 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then

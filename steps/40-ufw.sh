@@ -16,9 +16,13 @@ step_ufw() {
     ufw allow "${SSH_PORT}/tcp" comment "New SSH"
 
     if [[ -n "${EXTRA_PORTS_CLEAN:-}" ]]; then
+        local -a PORT_ARRAY=()
         IFS=',' read -ra PORT_ARRAY <<< "$EXTRA_PORTS_CLEAN"
         local PORT
         for PORT in "${PORT_ARRAY[@]}"; do
+            PORT="$(trim "$PORT")"
+            [[ -z "$PORT" ]] && continue
+            is_single_port "$PORT" || die "Invalid extra port: '${PORT}' (need 1-65535)."
             ufw allow "${PORT}/tcp" comment "Additional TCP port"
         done
     fi

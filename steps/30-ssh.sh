@@ -43,6 +43,12 @@ step_ssh_temp() {
     step "Temporary SSH config"
 
     [[ -n "${SSH_PORT:-}" && -n "${CURRENT_SSH_PORT:-}" ]] || die "Ports missing. Run the input step first."
+
+    # Never write a comma/space-separated list into a `Port` directive:
+    # sshd accepts one port per line only.
+    CURRENT_SSH_PORT="$(trim "$CURRENT_SSH_PORT")"
+    SSH_PORT="$(trim "$SSH_PORT")"
+    validate_sshd_ports "current" "$CURRENT_SSH_PORT" "new" "$SSH_PORT"
     [[ -n "${SSH_SERVICE:-}" ]] || SSH_SERVICE="ssh.service"
 
     if systemctl is-active --quiet ssh.socket 2>/dev/null || systemctl is-active --quiet sshd.socket 2>/dev/null; then
@@ -70,7 +76,10 @@ EOF
 
     chmod 600 "$SSH_DROPIN"
 
-    sshd -t
+    echo "--- ${SSH_DROPIN} ---"
+    cat "$SSH_DROPIN"
+
+    check_sshd_config "$SSH_DROPIN"
     systemctl restart "$SSH_SERVICE"
 
     assert_sshd_setting "passwordauthentication" "yes"

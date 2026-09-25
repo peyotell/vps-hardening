@@ -42,6 +42,9 @@ step_verify_and_finalize_ssh() {
 
     step "Final SSH config"
 
+    SSH_PORT="$(trim "$SSH_PORT")"
+    validate_sshd_ports "new" "$SSH_PORT"
+
     cat > "$SSH_DROPIN" <<EOF
 # Managed by vps-hardening
 Port ${SSH_PORT}
@@ -55,7 +58,7 @@ EOF
 
     chmod 600 "$SSH_DROPIN"
 
-    sshd -t
+    check_sshd_config "$SSH_DROPIN"
     systemctl restart "$SSH_SERVICE"
 
     assert_sshd_setting "passwordauthentication" "no"
