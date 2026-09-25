@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Preflight: root + Ubuntu 22.04/24.04 (anything else — with confirmation).
+# Preflight: root + Ubuntu 22.04/24.04/26.04 (anything else — with confirmation).
 
 step_preflight() {
     step "System check"
@@ -20,11 +20,11 @@ step_preflight() {
     fi
 
     case "${VERSION_ID:-}" in
-        22.04|24.04)
+        22.04|24.04|26.04)
             log "Detected Ubuntu ${VERSION_ID} LTS."
             ;;
         *)
-            warn "Detected ${PRETTY_NAME:-unknown OS}. Tested on 22.04/24.04."
+            warn "Detected ${PRETTY_NAME:-unknown OS}. Tested on 22.04/24.04/26.04."
             if ! confirm "Continue at your own risk"; then
                 die "Aborted by user."
             fi

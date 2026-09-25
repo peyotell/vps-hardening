@@ -12,6 +12,9 @@ step_backup() {
     cp -a /etc/ufw "$BACKUP_DIR/ufw" 2>/dev/null || true
     cp -a /etc/fail2ban "$BACKUP_DIR/fail2ban" 2>/dev/null || true
     cp -a /etc/default/ufw "$BACKUP_DIR/ufw-default" 2>/dev/null || true
+    # Systemd socket/service overrides decide how sshd gets its ports.
+    cp -a /etc/systemd/system/ssh.socket.d "$BACKUP_DIR/ssh.socket.d" 2>/dev/null || true
+    cp -a /etc/systemd/system/ssh.service.d "$BACKUP_DIR/ssh.service.d" 2>/dev/null || true
     ufw --numeric status numbered > "$BACKUP_DIR/ufw-status.txt" 2>/dev/null || true
 
     log "Backup: ${BACKUP_DIR}"
@@ -43,10 +46,7 @@ step_ssh_temp() {
     [[ -n "${SSH_SERVICE:-}" ]] || SSH_SERVICE="ssh.service"
 
     if systemctl is-active --quiet ssh.socket 2>/dev/null || systemctl is-active --quiet sshd.socket 2>/dev/null; then
-        systemctl disable --now ssh.socket 2>/dev/null || true
-        systemctl disable --now sshd.socket 2>/dev/null || true
-        systemctl mask ssh.socket 2>/dev/null || true
-        systemctl mask sshd.socket 2>/dev/null || true
+        disable_ssh_socket_activation
     fi
     systemctl enable --now "$SSH_SERVICE"
 

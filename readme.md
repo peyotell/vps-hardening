@@ -1,6 +1,6 @@
 # vps-hardening
 
-Initial VPS hardening on Ubuntu (22.04 / 24.04, others — with confirmation):
+Initial VPS hardening on Ubuntu (22.04 / 24.04 / 26.04, others — with confirmation):
 system update, SSH key for root, SSH port change, password auth disabled,
 UFW, Fail2ban. No extra user is created, everything runs as root.
 
@@ -61,9 +61,13 @@ sudo ./rollback.sh /root/vps-hardening-backup-YYYYMMDD-HHMMSS
 
 1. Backup of `/etc/ssh`, `/etc/ufw`, `/etc/fail2ban` before changes.
 2. Key is appended to `/root/.ssh/authorized_keys` (no duplicates).
-3. Temporary sshd drop-in `99-vps-hardening.conf` listens on old + new ports,
-   the main `sshd_config` is neutralized (on Ubuntu `Include` is at the top,
-   otherwise the drop-in gets overridden), result verified via `sshd -T`.
+3. Temporary sshd drop-in `99-vps-hardening.conf` listens on old + new ports.
+   Socket activation (default since 22.10, still default on 26.04) is
+   switched off first — otherwise the socket unit owns the ports and the
+   `Port` directive is ignored. The `00-socket.conf` override is removed
+   and `daemon-reload` is run. The main `sshd_config` is neutralized
+   (on Ubuntu `Include` is at the top, otherwise the drop-in gets
+   overridden), result verified via `sshd -T`.
 4. UFW: `deny incoming / allow outgoing`, both SSH ports + extras opened.
 5. Manual check of the new SSH login in a second terminal. Without
    confirmation — stop with ports left open (fail-open), final step skipped.

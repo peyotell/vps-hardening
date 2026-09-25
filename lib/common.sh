@@ -131,8 +131,21 @@ neutralize_main_sshd_config() {
         "$main"
 }
 
-delete_ufw_port_rule() {
-    local port="$1"
+# Switch from systemd socket activation (Ubuntu default since 22.10,
+# still default on 26.04) to the classic service so that the Port
+# directive in sshd_config is actually honored. The 00-socket.conf
+# drop-in must be removed or it forces socket mode back even with
+# the service enabled; daemon-reload is required afterwards.
+disable_ssh_socket_activation() {
+    systemctl disable --now ssh.socket 2>/dev/null || true
+    systemctl disable --now sshd.socket 2>/dev/null || true
+    systemctl mask ssh.socket 2>/dev/null || true
+    systemctl mask sshd.socket 2>/dev/null || true
+    rm -f /etc/systemd/system/ssh.service.d/00-socket.conf
+    systemctl daemon-reload
+}
+
+delete_ufw_port_rule() {    local port="$1"
     local numbers=""
 
     numbers="$(ufw --numeric status numbered 2>/dev/null \

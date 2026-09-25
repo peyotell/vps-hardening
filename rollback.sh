@@ -51,7 +51,21 @@ else
     SVC="ssh.service"
 fi
 systemctl unmask ssh.socket sshd.socket 2>/dev/null || true
-systemctl restart "$SVC" || systemctl restart ssh || true
+systemctl daemon-reload
+
+# If the backup had socket-activation overrides, the system originally
+# ran via ssh.socket — restore that mode instead of the classic service.
+if [[ -d "$BACKUP/ssh.socket.d" || -f "$BACKUP/ssh.service.d/00-socket.conf" ]]; then
+    rm -f /etc/systemd/system/ssh.service.d/00-socket.conf
+    cp -a "$BACKUP/ssh.socket.d/." /etc/systemd/system/ssh.socket.d/ 2>/dev/null || true
+    cp -a "$BACKUP/ssh.service.d/." /etc/systemd/system/ssh.service.d/ 2>/dev/null || true
+    systemctl daemon-reload
+    systemctl disable --now "$SVC" 2>/dev/null || true
+    systemctl enable --now ssh.socket 2>/dev/null || systemctl enable --now sshd.socket 2>/dev/null || true
+    log "Restored socket activation mode."
+else
+    systemctl restart "$SVC" || systemctl restart ssh || true
+fi
 
 ufw --force enable 2>/dev/null || true
 systemctl restart fail2ban 2>/dev/null || true
